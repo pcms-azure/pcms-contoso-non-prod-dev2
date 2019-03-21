@@ -2,42 +2,90 @@ provider "azurerm" {
     version = "~> 1.22"
 }
 
-variable "project" {
-    type        = "string"
-    default     = "pcms-contoso-non-prod"
-    description = "PCMS project identifier, e.g. pcms-<customername>-non-prod*"
+locals {
+    env = "${var.project}-${var.environment_name}"
 }
 
-variable "environment_name" {
-    type        = "string"
-    default     = "dev2"
-    description = "PCMS project identifier, e.g.prod, dev2"
+data "azurerm_image" "ubuntu" {
+  name                = "ubuntu"
+  resource_group_name = "images"
 }
 
-variable "prefix" {
-    type        = "string"
-    default     = "myfirstvmss"
-    description = "Prefix for the VMSS names."
+resource "azurerm_subnet" "env" {
+  name                 = "${local.env}"
+  virtual_network_name = "${var.project}-vnet"
+  resource_group_name  = "${var.project}-core"
+  address_prefix       = "${var.address_prefix}"
 }
 
-variable "loc" {
-    type        = "string"
-    default     = "westeurope"
-    description = "Azure region shortname."
+resource "azurerm_resource_group" "env" {
+    name        = "${local.env}"
+    location    = "${var.loc}"
+    tags        = "${var.tags}"
 }
 
-variable "tags" {
-    type        = "map"
-    default     = {}
-    description = "Map of tag name:value pairs."
+resource "azurerm_network_security_group" "env" {
+    name                = "${local.env}-nsg"
+    resource_group_name = "${azurerm_resource_group.env.name}"
+    location            = "${azurerm_resource_group.env.location}"
+    tags                = "${azurerm_resource_group.env.tags}"
 }
 
-resource "azurerm_resource_group" {
-
+resource "azurerm_application_security_group" "web" {
+    name                = "${local.env}-asg-web"
+    resource_group_name = "${azurerm_resource_group.env.name}"
+    location            = "${azurerm_resource_group.env.location}"
+    tags                = "${azurerm_resource_group.env.tags}"
 }
 
-/*
-module "vmss" {
-    source = "../pcms-module-vmss"
+resource "azurerm_application_security_group" "logic" {
+    name                = "${local.env}-asg-logic"
+    resource_group_name = "${azurerm_resource_group.env.name}"
+    location            = "${azurerm_resource_group.env.location}"
+    tags                = "${azurerm_resource_group.env.tags}"
 }
-*/
+
+resource "azurerm_network_security_rule" "web2logic" {
+    name                        = "${local.env}-web2logic"
+    network_security_group_name = "${azurerm_network_security_group.env.name}"
+    resource_group_name         = "${azurerm_resource_group.env.name}"
+
+    priority                    = 100
+    direction                   = "Inbound"
+    access                      = "Allow"
+    protocol                    = "Tcp"
+    source_port_range           = "*"
+    destination_port_ranges     = [ "80", "8080", "443" ]
+
+    source_application_security_group_ids      = [ "${azurerm_application_security_group.web.id}" ]
+    destination_application_security_group_ids = [ "${azurerm_application_security_group.logic.id}" ]
+}
+
+module "web" {
+    source = "../pcms-module-vmss" // change to GitHub reference when stable
+
+    project             = "${var.project}"
+    environment_name    = "${var.environment_name}"
+    prefix              = "web"
+
+    subnet_id           = "${azurerm_subnet.env.id}"
+    asg_id              = "${azurerm_application_security_group.web.id}"
+
+    vmmin               = 1
+    vmmax               = 10
+}
+
+module "logic" {
+    source = "../pcms-module-vmss" // change to GitHub reference when stable
+
+    project             = "${var.project}"
+    environment_name    = "${var.environment_name}"
+    prefix              = "logic"
+
+    subnet_id           = "${azurerm_subnet.env.id}"
+    asg_id              = "${azurerm_application_security_group.logic.id}"
+
+    image_id            = "${data.azurerm_image.ubuntu.id}"
+    vmmin               = 1
+    vmmax               = 5
+}
